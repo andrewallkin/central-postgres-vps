@@ -4,7 +4,6 @@ services:
     container_name: postgres-central
     restart: always
     env_file: .env
-    ports:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
