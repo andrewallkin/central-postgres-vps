@@ -14,6 +14,19 @@ services:
     networks:
       - postgres-net
 
+  backup:
+    build:
+      context: .
+      dockerfile: backup/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    restart: always
+    networks:
+      - postgres-net
+
 volumes:
   pgdata:
 
