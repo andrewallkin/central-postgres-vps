@@ -29,14 +29,14 @@ if os.environ.get("DATABASE_URL"):
     DB_PORT = str(parsed.port) if parsed.port else "5432"
     DB_USER = parsed.username
     DB_PASS = parsed.password
-    DB_NAME = parsed.path.lstrip("/") if parsed.path else None
+    DB_NAME = (parsed.path.lstrip("/") if parsed.path else None) or "postgres"
 else:
     # Use individual environment variables
     DB_HOST = os.environ.get("POSTGRES_HOST", "postgres")
     DB_PORT = os.environ.get("POSTGRES_PORT", "5432")
     DB_USER = os.environ.get("POSTGRES_USER")
     DB_PASS = os.environ.get("POSTGRES_PASSWORD")
-    DB_NAME = os.environ.get("POSTGRES_DB")
+    DB_NAME = os.environ.get("POSTGRES_DB", "postgres")
 
 # Backup configuration
 RETENTION_DAYS = int(os.environ.get("BACKUP_RETENTION_DAYS", "30"))
@@ -46,17 +46,16 @@ BACKUP_TIMEZONE = os.environ.get("BACKUP_TIMEZONE", "UTC")
 
 
 def create_pg_dump():
-    """Executes pg_dump to create a compressed backup file."""
+    """Executes pg_dumpall to create a compressed backup of all databases."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     backup_filename = f"backup_{timestamp}.sql.gz"
 
-    # Set environment variable for pg_dump password
+    # Set environment variable for pg_dumpall password
     os.environ["PGPASSWORD"] = DB_PASS
 
-    # The command to execute: pg_dump | gzip > file.sql.gz
-    # -Fp: Plain text format (easier to pipe to gzip)
-    pg_dump_command = [
-        "pg_dump",
+    # pg_dumpall dumps entire cluster (all databases, roles, tablespaces)
+    pg_dumpall_command = [
+        "pg_dumpall",
         "-h",
         DB_HOST,
         "-p",
@@ -65,28 +64,27 @@ def create_pg_dump():
         DB_USER,
         "-d",
         DB_NAME,
-        "-Fp",  # Plain text format
     ]
 
-    # Execute pg_dump and pipe the output to gzip
-    logger.info(f"Creating database dump: {backup_filename}...")
+    # Execute pg_dumpall and pipe the output to gzip
+    logger.info(f"Creating full cluster dump (all databases): {backup_filename}...")
     try:
-        pg_dump_process = subprocess.Popen(
-            pg_dump_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        pg_dumpall_process = subprocess.Popen(
+            pg_dumpall_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
 
         with open(backup_filename, "wb") as f_out:
             gzip_process = subprocess.run(
-                ["gzip"], stdin=pg_dump_process.stdout, stdout=f_out, check=True
+                ["gzip"], stdin=pg_dumpall_process.stdout, stdout=f_out, check=True
             )
 
-        pg_dump_process.stdout.close()
-        pg_dump_process.wait()
+        pg_dumpall_process.stdout.close()
+        pg_dumpall_process.wait()
 
-        if pg_dump_process.returncode != 0:
-            stderr = pg_dump_process.stderr.read().decode("utf-8")
+        if pg_dumpall_process.returncode != 0:
+            stderr = pg_dumpall_process.stderr.read().decode("utf-8")
             raise subprocess.CalledProcessError(
-                pg_dump_process.returncode, pg_dump_command, stderr=stderr
+                pg_dumpall_process.returncode, pg_dumpall_command, stderr=stderr
             )
 
         # Get file size for logging
@@ -97,9 +95,9 @@ def create_pg_dump():
         return backup_filename
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Error during pg_dump/gzip: {e}")
+        logger.error(f"Error during pg_dumpall/gzip: {e}")
         if hasattr(e, "stderr") and e.stderr:
-            logger.error(f"pg_dump stderr: {e.stderr}")
+            logger.error(f"pg_dumpall stderr: {e.stderr}")
         return None
     finally:
         # Clean up the password variable
@@ -114,16 +112,16 @@ def run_backup():
     logger.info("=" * 60)
 
     # Validate required environment variables
-    if not all([DB_HOST, DB_USER, DB_NAME]):
+    if not all([DB_HOST, DB_USER, DB_PASS]):
         logger.error("ERROR: Missing required database environment variables.")
-        logger.error(f"DB_HOST: {DB_HOST}, DB_USER: {DB_USER}, DB_NAME: {DB_NAME}")
+        logger.error(f"DB_HOST: {DB_HOST}, DB_USER: {DB_USER}, DB_PASS: {'*' if DB_PASS else None}")
         return
 
     # 1. Create PostgreSQL dump
     backup_file = create_pg_dump()
 
     if not backup_file:
-        logger.error("Failed to create database dump. Aborting backup.")
+        logger.error("Failed to create cluster dump. Aborting backup.")
         return
 
     try:
@@ -166,7 +164,7 @@ def run_backup():
 def main():
     """Main function to start the backup scheduler."""
     logger.info("Initializing backup scheduler...")
-    logger.info(f"Database: {DB_NAME} @ {DB_HOST}:{DB_PORT}")
+    logger.info(f"Cluster: all databases @ {DB_HOST}:{DB_PORT}")
     logger.info(f"Retention: {RETENTION_DAYS} days")
 
     # Get timezone
@@ -179,7 +177,7 @@ def main():
         tz = ZoneInfo("UTC")
 
     # Validate environment variables
-    if not all([DB_HOST, DB_USER, DB_NAME]):
+    if not all([DB_HOST, DB_USER, DB_PASS]):
         logger.error("Missing required database environment variables. Exiting.")
         sys.exit(1)
 
