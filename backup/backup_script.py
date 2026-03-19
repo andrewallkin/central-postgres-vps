@@ -8,6 +8,7 @@ import subprocess
 import datetime
 import logging
 import sys
+import time
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -43,6 +44,31 @@ RETENTION_DAYS = int(os.environ.get("BACKUP_RETENTION_DAYS", "30"))
 BACKUP_SCHEDULE_HOUR = os.environ.get("BACKUP_SCHEDULE_HOUR", "0,12")
 BACKUP_SCHEDULE_MINUTE = os.environ.get("BACKUP_SCHEDULE_MINUTE", "0")
 BACKUP_TIMEZONE = os.environ.get("BACKUP_TIMEZONE", "UTC")
+WAIT_FOR_POSTGRES_TIMEOUT = int(os.environ.get("BACKUP_WAIT_FOR_POSTGRES_TIMEOUT", "60"))
+WAIT_FOR_POSTGRES_INTERVAL = int(os.environ.get("BACKUP_WAIT_FOR_POSTGRES_INTERVAL", "2"))
+
+
+def wait_for_postgres() -> bool:
+    """Wait for PostgreSQL to be ready before running backup. Handles race conditions when
+    the backup container starts before postgres is fully ready (e.g. older Docker Compose)."""
+    if DB_PASS is not None:
+        os.environ["PGPASSWORD"] = DB_PASS
+    try:
+        cmd = ["pg_isready", "-h", DB_HOST, "-p", DB_PORT, "-U", DB_USER]
+        elapsed = 0
+        while elapsed < WAIT_FOR_POSTGRES_TIMEOUT:
+            result = subprocess.run(cmd, capture_output=True, env=os.environ)
+            if result.returncode == 0:
+                logger.info("PostgreSQL is ready")
+                return True
+            logger.info(f"Waiting for PostgreSQL at {DB_HOST}:{DB_PORT} ({elapsed}s elapsed)...")
+            time.sleep(WAIT_FOR_POSTGRES_INTERVAL)
+            elapsed += WAIT_FOR_POSTGRES_INTERVAL
+        logger.error(f"PostgreSQL not ready after {WAIT_FOR_POSTGRES_TIMEOUT}s. Aborting.")
+        return False
+    finally:
+        if "PGPASSWORD" in os.environ:
+            del os.environ["PGPASSWORD"]
 
 
 def create_pg_dump():
@@ -54,6 +80,7 @@ def create_pg_dump():
     os.environ["PGPASSWORD"] = DB_PASS
 
     # pg_dumpall dumps entire cluster (all databases, roles, tablespaces)
+    # Note: -d/--dbname expects a connection string, not a database name. Omit it; pg_dumpall uses postgres by default.
     pg_dumpall_command = [
         "pg_dumpall",
         "-h",
@@ -62,8 +89,6 @@ def create_pg_dump():
         DB_PORT,
         "-U",
         DB_USER,
-        "-d",
-        DB_NAME,
     ]
 
     # Execute pg_dumpall and pipe the output to gzip
@@ -115,6 +140,11 @@ def run_backup():
     if not all([DB_HOST, DB_USER, DB_PASS]):
         logger.error("ERROR: Missing required database environment variables.")
         logger.error(f"DB_HOST: {DB_HOST}, DB_USER: {DB_USER}, DB_PASS: {'*' if DB_PASS else None}")
+        return
+
+    # Wait for PostgreSQL to be ready (handles startup race conditions)
+    if not wait_for_postgres():
+        logger.error("Aborting backup: PostgreSQL not ready.")
         return
 
     # 1. Create PostgreSQL dump
